@@ -1,5 +1,11 @@
-# CI/CD pipeline: build the CAP MTA and deploy it to Cloud Foundry.
-# Runs on every push to main. Teaching version — commented line by line.
+# CI/CD pipeline for the CAP app.
+#
+# Two jobs form a "quality gate":
+#   1. quality-gate   — validates the code (compile check + tests). Must pass.
+#   2. build-and-deploy — only runs IF quality-gate passed (see `needs:`).
+#
+# This is the core CI/CD lesson: a broken commit can never reach Cloud Foundry,
+# because the gate stops the pipeline before the deploy job ever starts.
 
 name: Build & Deploy to Cloud Foundry
 
@@ -9,33 +15,65 @@ on:
   workflow_dispatch:        # lets you run it manually from the Actions tab
 
 jobs:
-  build-and-deploy:
+  # ---------------------------------------------------------------------------
+  # JOB 1 — QUALITY GATE
+  # Fast checks that catch broken code early. If anything here fails,
+  # the deploy job is skipped entirely.
+  # ---------------------------------------------------------------------------
+  quality-gate:
     runs-on: ubuntu-latest
-
     steps:
-      # 1. Get the source code onto the runner
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Install Node (CAP needs it to build)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      # 3. Install the CAP dev kit and the MTA Build Tool
-      - name: Install build tools
-        run: npm install -g @sap/cds-dk mbt
+      - name: Install CAP dev kit
+        run: npm install -g @sap/cds-dk
 
-      # 4. Install project dependencies (clean, reproducible install)
       - name: Install dependencies
         run: npm ci
 
-      # 5. Build the deployable archive -> mta_archives/*.mtar
+      # Compile check: builds the CDS model for production.
+      # Invalid CDS (bad entity, broken association, typo) fails HERE.
+      - name: Compile check (cds build)
+        run: npx cds build --production
+
+      # Runs `npm test` only if a test script exists, so this slot is ready
+      # for real unit tests later without breaking the pipeline today.
+      - name: Run tests (if any)
+        run: npm test --if-present
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 — BUILD & DEPLOY
+  # `needs: quality-gate` = this job starts ONLY after the gate passes.
+  # ---------------------------------------------------------------------------
+  build-and-deploy:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install build tools
+        run: npm install -g @sap/cds-dk mbt
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Build the deployable archive -> mta_archives/*.mtar
       - name: Build MTA
         run: mbt build
 
-      # 6. Install the Cloud Foundry CLI (v8) on the runner
+      # Install the Cloud Foundry CLI (v8) + the MultiApps plugin (`cf deploy`)
       - name: Install cf CLI
         run: |
           wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
@@ -44,15 +82,15 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
           sudo apt-get update
           sudo apt-get install -y cf8-cli
-          cf install-plugin multiapps -f   # the plugin that provides `cf deploy`
+          cf install-plugin multiapps -f
 
-      # 7. Log in to Cloud Foundry (credentials come from GitHub Secrets)
+      # Log in using credentials stored as GitHub Secrets (never in the repo)
       - name: Login to Cloud Foundry
         run: |
           cf api "${{ secrets.CF_API }}"
           cf auth "${{ secrets.CF_USER }}" "${{ secrets.CF_PASSWORD }}"
           cf target -o "${{ secrets.CF_ORG }}" -s "${{ secrets.CF_SPACE }}"
 
-      # 8. Deploy the archive (same command you ran by hand in BAS)
+      # Deploy (same command you ran by hand in BAS on Day 2)
       - name: Deploy to Cloud Foundry
         run: cf deploy mta_archives/*.mtar -f
