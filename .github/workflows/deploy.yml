@@ -1,0 +1,58 @@
+# CI/CD pipeline: build the CAP MTA and deploy it to Cloud Foundry.
+# Runs on every push to main. Teaching version — commented line by line.
+
+name: Build & Deploy to Cloud Foundry
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:        # lets you run it manually from the Actions tab
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Get the source code onto the runner
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Install Node (CAP needs it to build)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 3. Install the CAP dev kit and the MTA Build Tool
+      - name: Install build tools
+        run: npm install -g @sap/cds-dk mbt
+
+      # 4. Install project dependencies (clean, reproducible install)
+      - name: Install dependencies
+        run: npm ci
+
+      # 5. Build the deployable archive -> mta_archives/*.mtar
+      - name: Build MTA
+        run: mbt build
+
+      # 6. Install the Cloud Foundry CLI (v8) on the runner
+      - name: Install cf CLI
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/cli.cloudfoundry.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cli.cloudfoundry.org.gpg] https://packages.cloudfoundry.org/debian stable main" \
+            | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update
+          sudo apt-get install -y cf8-cli
+          cf install-plugin multiapps -f   # the plugin that provides `cf deploy`
+
+      # 7. Log in to Cloud Foundry (credentials come from GitHub Secrets)
+      - name: Login to Cloud Foundry
+        run: |
+          cf api "${{ secrets.CF_API }}"
+          cf auth "${{ secrets.CF_USER }}" "${{ secrets.CF_PASSWORD }}"
+          cf target -o "${{ secrets.CF_ORG }}" -s "${{ secrets.CF_SPACE }}"
+
+      # 8. Deploy the archive (same command you ran by hand in BAS)
+      - name: Deploy to Cloud Foundry
+        run: cf deploy mta_archives/*.mtar -f
