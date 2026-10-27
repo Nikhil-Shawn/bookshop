@@ -1,33 +1,32 @@
-# CI/CD pipeline for the CAP app.
+# CI/CD pipeline — 4-stage promotion model:
 #
-# Two jobs form a "quality gate":
-#   1. quality-gate   — validates the code (compile check + tests). Must pass.
-#   2. build-and-deploy — only runs IF quality-gate passed (see `needs:`).
+#   quality-gate  →  deploy-dev (auto)  →  deploy-qual (auto)  →  deploy-prod (manual approval)
 #
-# This is the core CI/CD lesson: a broken commit can never reach Cloud Foundry,
-# because the gate stops the pipeline before the deploy job ever starts.
+# The `environment:` key on each deploy job links it to a GitHub Environment.
+# The "production" environment is configured with required reviewers — GitHub
+# pauses the pipeline and waits for a human to click "Approve" before prod runs.
+#
+# Space names (dev / qual / prod) are not secrets — hardcoded directly.
+# Sensitive credentials stay in repo-level secrets: CF_API, CF_ORG, CF_USER, CF_PASSWORD.
 
 name: Build & Deploy to Cloud Foundry
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:        # lets you run it manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   # ---------------------------------------------------------------------------
   # JOB 1 — QUALITY GATE
-  # Fast checks that catch broken code early. If anything here fails,
-  # the deploy job is skipped entirely.
+  # Must pass before any deployment starts.
   # ---------------------------------------------------------------------------
   quality-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
@@ -37,60 +36,106 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Compile check: builds the CDS model for production.
-      # Invalid CDS (bad entity, broken association, typo) fails HERE.
       - name: Compile check (cds build)
         run: npx cds build --production
 
-      # Runs `npm test` only if a test script exists, so this slot is ready
-      # for real unit tests later without breaking the pipeline today.
       - name: Run tests (if any)
         run: npm test --if-present
 
   # ---------------------------------------------------------------------------
-  # JOB 2 — BUILD & DEPLOY
-  # `needs: quality-gate` = this job starts ONLY after the gate passes.
+  # JOB 2 — DEPLOY TO DEV  (automatic after gate passes)
   # ---------------------------------------------------------------------------
-  build-and-deploy:
+  deploy-dev:
     needs: quality-gate
     runs-on: ubuntu-latest
+    environment: development
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - run: npm install -g @sap/cds-dk mbt
+      - run: npm ci
+      - run: mbt build
 
-      - name: Install build tools
-        run: npm install -g @sap/cds-dk mbt
-
-      - name: Install dependencies
-        run: npm ci
-
-      # Build the deployable archive -> mta_archives/*.mtar
-      - name: Build MTA
-        run: mbt build
-
-      # Install the Cloud Foundry CLI (v8) + the MultiApps plugin (`cf deploy`)
       - name: Install cf CLI
         run: |
           wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
             | sudo gpg --dearmor -o /usr/share/keyrings/cli.cloudfoundry.org.gpg
           echo "deb [signed-by=/usr/share/keyrings/cli.cloudfoundry.org.gpg] https://packages.cloudfoundry.org/debian stable main" \
             | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
-          sudo apt-get update
-          sudo apt-get install -y cf8-cli
+          sudo apt-get update && sudo apt-get install -y cf8-cli
           cf install-plugin multiapps -f
 
-      # Log in using credentials stored as GitHub Secrets (never in the repo)
-      - name: Login to Cloud Foundry
+      - name: Deploy to dev
         run: |
           cf api "${{ secrets.CF_API }}"
           cf auth "${{ secrets.CF_USER }}" "${{ secrets.CF_PASSWORD }}"
-          cf target -o "${{ secrets.CF_ORG }}" -s "${{ secrets.CF_SPACE }}"
+          cf target -o "${{ secrets.CF_ORG }}" -s dev
+          cf deploy mta_archives/*.mtar -f
 
-      # Deploy (same command you ran by hand in BAS on Day 2)
-      - name: Deploy to Cloud Foundry
-        run: cf deploy mta_archives/*.mtar -f
+  # ---------------------------------------------------------------------------
+  # JOB 3 — DEPLOY TO QUAL  (automatic after dev succeeds)
+  # ---------------------------------------------------------------------------
+  deploy-qual:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @sap/cds-dk mbt
+      - run: npm ci
+      - run: mbt build
+
+      - name: Install cf CLI
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/cli.cloudfoundry.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cli.cloudfoundry.org.gpg] https://packages.cloudfoundry.org/debian stable main" \
+            | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update && sudo apt-get install -y cf8-cli
+          cf install-plugin multiapps -f
+
+      - name: Deploy to qual
+        run: |
+          cf api "${{ secrets.CF_API }}"
+          cf auth "${{ secrets.CF_USER }}" "${{ secrets.CF_PASSWORD }}"
+          cf target -o "${{ secrets.CF_ORG }}" -s qual
+          cf deploy mta_archives/*.mtar -f
+
+  # ---------------------------------------------------------------------------
+  # JOB 4 — DEPLOY TO PROD  (requires manual approval in GitHub UI)
+  # The "production" environment has required reviewers configured —
+  # GitHub pauses HERE and shows an "Approve deployment" button.
+  # ---------------------------------------------------------------------------
+  deploy-prod:
+    needs: deploy-qual
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @sap/cds-dk mbt
+      - run: npm ci
+      - run: mbt build
+
+      - name: Install cf CLI
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/cli.cloudfoundry.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cli.cloudfoundry.org.gpg] https://packages.cloudfoundry.org/debian stable main" \
+            | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update && sudo apt-get install -y cf8-cli
+          cf install-plugin multiapps -f
+
+      - name: Deploy to prod
+        run: |
+          cf api "${{ secrets.CF_API }}"
+          cf auth "${{ secrets.CF_USER }}" "${{ secrets.CF_PASSWORD }}"
+          cf target -o "${{ secrets.CF_ORG }}" -s prod
+          cf deploy mta_archives/*.mtar -f
