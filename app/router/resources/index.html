@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bookshop</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --card:#ffffff; --ink:#1b2733; --muted:#5b6b7b;
+    --accent:#0a6ed1; --line:#e2e8f0; --ok:#1a7f4b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--ink);line-height:1.5}
+
+  header{background:var(--accent);color:#fff;padding:16px 28px;display:flex;
+         align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  header h1{font-size:20px;font-weight:700;letter-spacing:-.2px}
+  header .user{font-size:13px;display:flex;align-items:center;gap:14px}
+  header .user #who{opacity:.9}
+  header .user a{color:#fff;text-decoration:none;border:1px solid rgba(255,255,255,.5);
+                 padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600}
+  header .user a:hover{background:rgba(255,255,255,.15)}
+
+  main{max-width:1000px;margin:28px auto;padding:0 20px}
+  .bar{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px}
+  .bar h2{font-size:16px;color:var(--muted);font-weight:600}
+  .bar span{font-size:13px;color:var(--muted)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+  .book{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+        box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .book h3{font-size:16px;margin-bottom:4px}
+  .book .author{font-size:13px;color:var(--muted);margin-bottom:12px}
+  .book .descr{font-size:12.5px;color:var(--muted);margin-bottom:14px;
+               display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .book .foot{display:flex;align-items:center;justify-content:space-between;
+              border-top:1px solid var(--line);padding-top:12px}
+  .book .price{font-size:16px;font-weight:700;color:var(--accent)}
+  .book .stock{font-size:12px;color:var(--ok);font-weight:600}
+  .book .stock.low{color:#b8540a}
+
+  .state{text-align:center;color:var(--muted);padding:60px 20px;font-size:15px}
+  .state.err{color:#c0392b}
+</style>
+</head>
+<body>
+  <header>
+    <h1>📚 Bookshop</h1>
+    <div class="user">
+      <span id="who">…</span>
+      <a href="/logout">Log out</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="bar">
+      <h2>Catalog</h2>
+      <span id="count"></span>
+    </div>
+    <div id="grid" class="grid"></div>
+    <div id="state" class="state">Loading books…</div>
+  </main>
+
+<script>
+  // Show who is logged in — proves XSUAA authentication visually.
+  fetch('/user-api/currentUser')
+    .then(r => r.json())
+    .then(u => {
+      const name = u.firstname ? (u.firstname + ' ' + (u.lastname || '')) : (u.name || u.email || 'user');
+      document.getElementById('who').textContent = 'Logged in as ' + name.trim();
+    })
+    .catch(() => { document.getElementById('who').textContent = ''; });
+
+  // Fetch the catalog through the approuter (authenticated) → srv → HANA.
+  const grid  = document.getElementById('grid');
+  const state = document.getElementById('state');
+  const count = document.getElementById('count');
+
+  fetch('/odata/v4/catalog/Books')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(data => {
+      const books = data.value || [];
+      if (!books.length) { state.textContent = 'No books found.'; return; }
+      state.style.display = 'none';
+      count.textContent = books.length + ' titles';
+      grid.innerHTML = books.map(b => {
+        const price = b.price != null ? (b.price + ' ' + (b.currency_code || '')) : '';
+        const low   = (b.stock != null && b.stock < 15) ? ' low' : '';
+        const stock = b.stock != null ? ('In stock: ' + b.stock) : '';
+        return `<div class="book">
+            <h3>${esc(b.title)}</h3>
+            <div class="author">${esc(b.author || '')}</div>
+            <div class="descr">${esc(b.descr || '')}</div>
+            <div class="foot">
+              <span class="price">${esc(price)}</span>
+              <span class="stock${low}">${esc(stock)}</span>
+            </div>
+          </div>`;
+      }).join('');
+    })
+    .catch(err => {
+      state.className = 'state err';
+      state.textContent = 'Could not load books: ' + err.message;
+    });
+
+  function esc(s){ return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>
