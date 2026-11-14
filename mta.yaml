@@ -35,6 +35,22 @@ modules:
     requires:
       - name: bookshop-db
 
+  - name: bookshop-approuter
+    type: nodejs
+    path: app/router
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 256M
+      disk-quota: 512M
+    requires:
+      - name: bookshop-auth
+      - name: srv-api
+        group: destinations
+        properties:
+          name: srv-api
+          url: ~{srv-url}
+          forwardAuthToken: true
+
 resources:
   - name: bookshop-auth
     type: org.cloudfoundry.managed-service
@@ -49,6 +65,8 @@ resources:
           credential-types:
             - "binding-secret"
             - "x509"
+          redirect-uris:
+            - "https://*.cfapps.us10-001.hana.ondemand.com/**"
         role-collections:
           - name: 'admin (bookshop ${org}-${space})'
             description: 'generated'
